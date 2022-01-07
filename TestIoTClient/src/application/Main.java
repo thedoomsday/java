@@ -4,14 +4,17 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.stage.Stage;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.TextArea;
+import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.GridPane;
@@ -23,22 +26,25 @@ import javafx.event.ActionEvent;
 import javafx.event.EventHandler;
 
 import shared.MessageStructure;
-import shared.UIReporter;
 
-public class Main extends Application {
+public class Main extends Application implements IoTClientListener {
 	
     private Label lblIoTC2SPublishRate = new Label("Publish rate per second");
    	private TextField txtIoTC2SPublishRate = new TextField("1");
     private Button btnIoTC2SPublish = new Button("Start publishing");
     private TextField txtIoTClients = new TextField("-");
     private Button btnAddIotClient = new Button("Add IoT client");
-    private TextArea txtOutput = new TextArea();
+    private ListView<String> lvOutput = new ListView<>();
+    private Stage mainStage;
 	
+    private String stageTitle = "IoT Test Client";
 	private boolean isPublishing = false;
+	private final AtomicInteger outputIncrement = new AtomicInteger(0);
 	private final AtomicLong messageCount = new AtomicLong(0);
-	public static UIReporter reporter;
 	private Thread publisher;
+	private Thread statusUpdater;
 	private List<IoTClient> iotClients = new ArrayList<>();
+	private LinkedBlockingQueue<String[]> statuses = new LinkedBlockingQueue<>();
 		
 	@Override
 	public void start(Stage primaryStage) {
@@ -47,13 +53,15 @@ public class Main extends Application {
 	        root.setPadding(new Insets(10, 10, 10, 10));
 	        addControls(root);
 	        setControlHooks();
-	        reporter = new UIReporter(null, null, null,	null, null, null, primaryStage, "Messaging test", txtOutput);
 	        addIotClient();
 			Scene scene = new Scene(root, 550, 300);
 			scene.getStylesheets().add(getClass().getResource("application.css").toExternalForm());
+			mainStage = primaryStage;
+			primaryStage.setTitle(stageTitle);
 			primaryStage.setResizable(false);
 			primaryStage.setScene(scene);
 			primaryStage.show();
+			startStatusUpdater();
 		} catch(Exception e) {
 			e.printStackTrace();
 		}
@@ -61,10 +69,52 @@ public class Main extends Application {
 	
 	@Override
 	public void stop() throws Exception {
+		statusUpdater.interrupt();
 		iotClients.forEach(c -> c.close());
 		if (publisher != null) publisher.interrupt();
 		publisher = null;
 		super.stop();
+	}
+	
+	@Override
+	public void connectionFirstEstablished(String clientId) {
+		updateStatus(clientId + ": waiting for messages.", null);
+	}
+
+	@Override
+	public void connectionLost(String clientId) {
+		String msg = clientId + ": Connection is lost. Reconnecting...";
+		updateStatus(msg, msg);
+	}
+
+	@Override
+	public void connectionReestablished(String clientId) {
+		updateStatus(clientId + ": recovered, waiting for messages.", stageTitle);
+	}
+
+	@Override
+	public void messagePublished(String clientId, String topic, MessageStructure message) {
+		try {
+			updateStatus(clientId + ": IoT message published to topic " + topic + ": \r\n" + message.getString(), null);
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+
+	@Override
+	public void messageReceived(String clientId, String topic, MessageStructure message) {
+		try {
+			updateStatus(clientId + ": IoT message arrived with topic " + topic + ": \r\n" + message.getString(), null);
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+
+	@Override
+	public void connectionClosed(String clientId) {
+		updateStatus(clientId + " disconnected gracefully.", null);
 	}
 	
 	public static void main(String[] args) {
@@ -73,7 +123,7 @@ public class Main extends Application {
 	
 	private void addIotClient() throws Exception {
         String clientId = "MQTT-Test-Client " + String.valueOf(iotClients.size() + 1);
-        iotClients.add(new IoTClient(clientId, reporter));
+        iotClients.add(new IoTClient(clientId, this));
         txtIoTClients.setText(String.valueOf(iotClients.size()));
 	}
 	
@@ -106,9 +156,12 @@ public class Main extends Application {
 		Pane vPlaceHolder2 = new Pane();
 		vPlaceHolder2.setMinHeight(10);
 		root.add(vPlaceHolder2, 0, 1);
-		root.add(new Label("IoT Client output"), 0, 2, 3, 1);
-		txtOutput.setMinHeight(204);
-		root.add(txtOutput, 0, 3, 3, 1);
+		Label lblOutput = new Label("IoT Client output");
+		lblOutput.setFont(Font.font(null, FontWeight.BOLD, 12));
+		lblOutput.setUnderline(true);
+		root.add(lblOutput, 0, 2, 3, 1);
+		lvOutput.setMinHeight(204);
+		root.add(lvOutput, 0, 3, 3, 1);
 	}
 	
 	private void setControlHooks() {
@@ -143,7 +196,6 @@ public class Main extends Application {
     	    	try {
 					addIotClient();
 				} catch (Exception e) {
-					// TODO Auto-generated catch block
 					e.printStackTrace();
 				}
     	    }
@@ -205,6 +257,52 @@ public class Main extends Application {
 			return;
 		}
     	iotClients.forEach(c -> c.publish(message));
+	}
+	
+	private void addOutput(String text) {
+		int i = outputIncrement.incrementAndGet();
+		if (i > 2000) {
+			lvOutput.getItems().clear();
+			outputIncrement.set(0);
+		}
+		lvOutput.getItems().add(text);
+		if (i == 10) lvOutput.scrollTo(lvOutput.getItems().size());
+	}
+	
+	private void updateStatus(String text, String title) {
+		try {
+			statuses.put(new String[]{text, title});
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	
+	private void startStatusUpdater() {
+		statusUpdater = new Thread(new Runnable() {
+			@Override
+			public void run () {
+				while (!Thread.currentThread().isInterrupted()) {
+					try {
+						updateUIStatus(statuses.take());
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+			}
+		});
+		statusUpdater.start();
+	}
+	
+	private void updateUIStatus(String[] status) {
+		String text = status[0];
+		String title = status[1];
+		Platform.runLater(new Runnable() {
+			@Override
+			public void run() {
+				if (text != null) addOutput(text);
+				if (title != null) mainStage.setTitle(title);
+			}
+		});
 	}
 	
 };

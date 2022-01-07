@@ -16,8 +16,6 @@ import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.MessageProperties;
 
-import shared.UIReporter;
-
 public class MessagingSupervisor implements Runnable {
 	
 	private Thread thread;
@@ -43,18 +41,16 @@ public class MessagingSupervisor implements Runnable {
 	private ConcurrentMessageStore iotPublishStore;
 	private List<MessagePublisher> iotPublishers = new ArrayList<>();
 	private List<MessageSubscriber> iotEventSubscribers = new ArrayList<>();
-	
-	private UIReporter reporter;
+	private MessagingListener listener;
 	
 	public MessagingSupervisor(MessagingSettings settings, ConcurrentMessageStore publishStore, 
-			ConcurrentMessageStore iotPublishStore, UIReporter reporter) throws IOException {
+			ConcurrentMessageStore iotPublishStore, MessagingListener listener) throws IOException {
 		processConfig(settings);
 		this.publishStore = publishStore;
 		this.iotPublishStore = iotPublishStore;
 		openConnectionsAndChannels();
 		createExchangeAndQueue();
-		
-		this.reporter = reporter;
+		this.listener = listener;
 	}
 	
 	public void start() {
@@ -64,15 +60,16 @@ public class MessagingSupervisor implements Runnable {
 	}
 	
 	public synchronized void interrupt() {
+		closeWorkers();
+		if (listener != null) listener.statusMessageNotification("Supervisor terminated.");
 		thread.interrupt();
 	}
 	
 	@Override
 	public void run() {
-		System.out.println("Supervisor started.");
+		if (listener != null) listener.statusMessageNotification("Supervisor started.");
 		while (!Thread.currentThread().isInterrupted()) supervise();
-		close();
-		System.out.println("Supervisor terminated.");
+		closeResources();
 	}
 	
 	private void processConfig(MessagingSettings settings) {
@@ -114,31 +111,32 @@ public class MessagingSupervisor implements Runnable {
 				conn = factory.newConnection(connName);
 			}
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		} catch (TimeoutException e) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
 		return conn;
 	}
 	
-	private void close() {
+	private void closeWorkers() {
+		interruptPublishers(iotPublishers);
+		interruptPublishers(publishers);
+		terminateSubscribers(iotEventSubscribers);
+		terminateSubscribers(eventSubscribers);
+	}
+	
+	private void closeResources() {
 		try {
-			closeChannel(iotSupervisorChannel);
-			closeConnection(iotSupervisorConnection);
-			closeChannel(supervisorChannel);
-			closeConnection(supervisorConnection);
-			interruptPublishers(iotPublishers);
-			interruptPublishers(publishers);
-			terminateSubscribers(iotEventSubscribers);
-			terminateSubscribers(eventSubscribers);
 			closeConnection(iotSubscribeConnection);
 			closeConnection(iotPublishConnection);
 			closeConnection(subscribeConnection);
 			closeConnection(publishConnection);
 			if (isIoTEventSubscribeMode) stopSubThreadPool(iotSubscriberThreadPool);
 			if (isEventSubscribeMode) stopSubThreadPool(subscriberThreadPool);
+			closeChannel(iotSupervisorChannel);
+			closeConnection(iotSupervisorConnection);
+			closeChannel(supervisorChannel);
+			closeConnection(supervisorConnection);
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
@@ -185,7 +183,6 @@ public class MessagingSupervisor implements Runnable {
 				iotSupervisorChannel.queueDeclare(config.getIoTEventQueueName(), true, false, false, null);
 			}
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
 	}
@@ -223,8 +220,7 @@ public class MessagingSupervisor implements Runnable {
 		if (pubCount < config.getMinPublishers()) addPublishers(config.getMinPublishers() - pubCount, false);
 		else if (msgCount > 1 && pubCount < config.getMaxPublishers()) addPublishers(1, false); // 1 per pass
 		else if (msgCount == 0 && pubCount > config.getMinPublishers()) removePublishers(1, false); // 1 per pass
-		
-		reporter.reportPublishingStatus(msgCount, publishers.size(), false);
+		if (listener != null) listener.publishingStatusNotification(msgCount, publishers.size());
 	}
 	
 	private void superviseEventSubscribers() throws IOException {
@@ -236,8 +232,7 @@ public class MessagingSupervisor implements Runnable {
 		if (subCount < config.getMinEventSubscribers()) addEventSubscribers(config.getMinEventSubscribers() - subCount, false);
 		else if (msgCount > 1 && subCount < config.getMaxEventSubscribers()) addEventSubscribers(1, false); // 1 per pass
 		else if (msgCount == 0 && subCount > config.getMinEventSubscribers()) removeEventSubscribers(1, false); // 1 per pass
-		
-		reporter.reportSubscribingStatus(eventSubscribers.size(), false);
+		if (listener != null) listener.subscribingStatusNotification(msgCount, subCount);
 	}
 	
 	private void superviseIoTPublishers() {
@@ -249,8 +244,7 @@ public class MessagingSupervisor implements Runnable {
 		if (pubCount < config.getMinIoTPublishers()) addPublishers(config.getMinIoTPublishers() - pubCount, true);
 		else if (msgCount > 1 && pubCount < config.getMaxIoTPublishers()) addPublishers(1, true); // 1 per pass
 		else if (msgCount == 0 && pubCount > config.getMinIoTPublishers()) removePublishers(1, true); // 1 per pass
-		
-		reporter.reportPublishingStatus(msgCount, iotPublishers.size(), true);
+		if (listener != null) listener.publishingIoTStatusNotification(msgCount, iotPublishers.size());
 	}
 	
 	private void superviseIoTEventSubscribers() throws IOException {
@@ -262,8 +256,7 @@ public class MessagingSupervisor implements Runnable {
 		if (subCount < config.getMinIoTEventSubscribers()) addEventSubscribers(config.getMinIoTEventSubscribers() - subCount, true);
 		else if (msgCount > 1 && subCount < config.getMaxIoTEventSubscribers()) addEventSubscribers(1, true); // 1 per pass
 		else if (msgCount == 0 && subCount > config.getMinIoTEventSubscribers()) removeEventSubscribers(1, true); // 1 per pass
-		
-		reporter.reportSubscribingStatus(iotEventSubscribers.size(), true);
+		if (listener != null) listener.subscribingIoTStatusNotification(msgCount, subCount);
 	}
 	
 	private void addPublishers(int count, boolean isIoT) {
@@ -292,12 +285,12 @@ public class MessagingSupervisor implements Runnable {
 		String pubId = (isIoT ? "IoT_" : "") + "Publisher_" + String.valueOf(pubList.size() + 1);
 		BasicProperties msgType = isIoT ? MessageProperties.MINIMAL_BASIC : MessageProperties.PERSISTENT_TEXT_PLAIN;
 		try {
-			MessagePublisher publisher = new MessagePublisher(connection, exchangeName, pubStore, pubId, msgType);
+			MessagePublisher publisher = new MessagePublisher(connection, exchangeName, pubStore, pubId, msgType, listener);
 			pubList.add(publisher);
 			publisher.start();
-			System.out.println((isIoT ? "IoT " : "") + "Publisher count: " + String.valueOf(pubList.size()));
+			if (listener != null) listener.statusMessageNotification((isIoT ? "IoT " : "") + 
+					"Publisher count: " + String.valueOf(pubList.size()));
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
 	}
@@ -307,7 +300,8 @@ public class MessagingSupervisor implements Runnable {
 		if (pubList.size() == 0) return;
     	MessagePublisher p = pubList.remove(pubList.size() - 1);
     	p.interrupt();
-    	System.out.println((isIoT ? "IoT " : "") + "Publisher count: " + String.valueOf(pubList.size()));
+    	if (listener != null) listener.statusMessageNotification((isIoT ? "IoT " : "") + 
+    			"Publisher count: " + String.valueOf(pubList.size()));
 	}
 	
 	private void addEventSubscriber(boolean isIoT) {
@@ -320,10 +314,10 @@ public class MessagingSupervisor implements Runnable {
 		List<MessageSubscriber> subList = isIoT ? iotEventSubscribers : eventSubscribers;
 		String subId = (isIoT ? "IoT_" : "") + "Subscriber " + String.valueOf(subList.size() + 1);
 		try {
-			subList.add(new MessageSubscriber(connection, exchangeName, eventQueueName, topicPatterns, subId));
-			System.out.println((isIoT ? "IoT " : "") + "Subscriber count: " + String.valueOf(eventSubscribers.size()));
+			subList.add(new MessageSubscriber(connection, exchangeName, eventQueueName, topicPatterns, subId, listener));
+			if (listener != null) listener.statusMessageNotification((isIoT ? "IoT " : "") + 
+					"Subscriber count: " + String.valueOf(eventSubscribers.size()));
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
 	}
@@ -333,7 +327,8 @@ public class MessagingSupervisor implements Runnable {
 		if (subList.size() == 0) return;
     	MessageSubscriber c = subList.remove(subList.size() - 1);
     	c.terminateGracefully();
-    	System.out.println((isIoT ? "IoT " : "") + "Subscriber count: " + String.valueOf(eventSubscribers.size()));
+    	if (listener != null) listener.statusMessageNotification((isIoT ? "IoT " : "") + 
+    			"Subscriber count: " + String.valueOf(eventSubscribers.size()));
 	}
 	
 }

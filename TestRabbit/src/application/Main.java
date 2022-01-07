@@ -2,16 +2,19 @@ package application;
 	
 import org.json.JSONObject;
 
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import shared.MessageStructure;
-import shared.UIReporter;
 
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.stage.Stage;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
 import javafx.scene.control.TextField;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.GridPane;
@@ -22,7 +25,7 @@ import javafx.geometry.Insets;
 import javafx.event.ActionEvent;
 import javafx.event.EventHandler;
 
-public class Main extends Application {
+public class Main extends Application implements MessagingListener {
 	
 	private TextField txtPublishRate = new TextField("1");
     private Button btnPublish = new Button("Start publishing");
@@ -36,6 +39,7 @@ public class Main extends Application {
     private Label lblIoTSubscribers = new Label("-");
 	private TextField txtIoTS2CPublishRate = new TextField("1");
     private Button btnIoTS2CPublish = new Button("Start publishing");
+    private ListView<String> lvOutput = new ListView<>();
 	
 	private boolean isPublishing = false;
 	private boolean isIoTPublishing = false;
@@ -43,11 +47,13 @@ public class Main extends Application {
 	private final AtomicLong messageCount = new AtomicLong(0);
 	private final AtomicLong iotMessageCount = new AtomicLong(0);
 	private final AtomicLong iotS2CMessageCount = new AtomicLong(0);
-	public static UIReporter reporter;
+	private final AtomicInteger outputIncrement = new AtomicInteger(0);
 	public static MessagingManager messagingManager;
+	private LinkedBlockingQueue<String> statuses = new LinkedBlockingQueue<>();
 	private Thread publisher;
 	private Thread iotPublisher;
 	private Thread iotS2CPublisher;
+	private Thread statusListUpdater;
 		
 	@Override
 	public void start(Stage primaryStage) {
@@ -56,14 +62,13 @@ public class Main extends Application {
 	        root.setPadding(new Insets(10, 10, 10, 10));
 	        addControls(root);
 	        setControlHooks();
-	        reporter = new UIReporter(lblPublishQueue, lblPublishers, lblSubscribers, 
-	        		lblIoTPublishQueue, lblIoTPublishers, lblIoTSubscribers, null, null, null);
-	        messagingManager = new MessagingManager(reporter);
+	        messagingManager = new MessagingManager(this);
 			Scene scene = new Scene(root, 690, 500);
 			scene.getStylesheets().add(getClass().getResource("application.css").toExternalForm());
 			primaryStage.setResizable(false);
 			primaryStage.setScene(scene);
 			primaryStage.show();
+			startStatusListUpdater();
 		} catch(Exception e) {
 			e.printStackTrace();
 		}
@@ -71,7 +76,7 @@ public class Main extends Application {
 	
 	@Override
 	public void stop() throws Exception {
-		Thread.sleep(1000);//to consume the lwt and show it in console
+		statusListUpdater.interrupt();
 		if (publisher != null) publisher.interrupt();
 		publisher = null;
 		if (iotPublisher != null) iotPublisher.interrupt();
@@ -85,6 +90,31 @@ public class Main extends Application {
 	
 	public static void main(String[] args) {
 		launch(args);
+	}
+	
+	@Override
+	public void publishingStatusNotification(int messageCount, int publisherCount) {
+		updateStatus(messageCount, publisherCount, lblPublishQueue, lblPublishers);
+	}
+
+	@Override
+	public void subscribingStatusNotification(int messageCount, int subscriberCount) {
+		updateStatus(messageCount, subscriberCount, null, lblSubscribers);
+	}
+
+	@Override
+	public void publishingIoTStatusNotification(int messageCount, int publisherCount) {
+		updateStatus(messageCount, publisherCount, lblIoTPublishQueue, lblIoTPublishers);
+	}
+
+	@Override
+	public void subscribingIoTStatusNotification(int messageCount, int subscriberCount) {
+		updateStatus(messageCount, subscriberCount, null, lblIoTSubscribers);
+	}
+	
+	@Override
+	public void statusMessageNotification(String message) {
+		addStatusText(message);
 	}
 	
 	private void addControls(GridPane root) {
@@ -142,6 +172,15 @@ public class Main extends Application {
 		iotS2C.add(txtIoTS2CPublishRate, 0, 2);
 		iotS2C.add(btnIoTS2CPublish, 1, 2);
 		root.add(iotS2C, 0, 2);
+		Pane vPlaceHolder2 = new Pane();
+		vPlaceHolder2.setMinHeight(10);
+		root.add(vPlaceHolder2, 0, 3);
+		Label lblOutput = new Label("Server output");
+		lblOutput.setFont(Font.font(null, FontWeight.BOLD, 12));
+		lblOutput.setUnderline(true);
+		root.add(lblOutput, 0, 4, 3, 1);
+		lvOutput.setMinHeight(204);
+		root.add(lvOutput, 0, 5, 3, 1);
 	}
 	
 	private void setControlHooks() {
@@ -346,6 +385,59 @@ public class Main extends Application {
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
+	}
+	
+	private void addStatusText(String message) {
+		try {
+			statuses.put(message);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	
+	private void updateStatus(int int1, int int2, Label label1, Label label2) {
+		Platform.runLater(new Runnable() {
+			@Override
+			public void run() {
+				if (label1 != null) label1.setText(String.valueOf(int1));
+				if (label2 != null) label2.setText(String.valueOf(int2));
+			}
+		});
+	}
+	
+	private void updateStatusList(String statusText) {
+		Platform.runLater(new Runnable() {
+			@Override
+			public void run() {
+				if (statusText != null) addStatusTextToList(statusText);
+			}
+		});
+	}
+	
+	private void addStatusTextToList(String text) {
+		int i = outputIncrement.incrementAndGet();
+		if (i > 2000) {
+			lvOutput.getItems().clear();
+			outputIncrement.set(0);
+		}
+		lvOutput.getItems().add(text);
+		if (i == 20) lvOutput.scrollTo(lvOutput.getItems().size());
+	}
+	
+	private void startStatusListUpdater() {
+		statusListUpdater = new Thread(new Runnable() {
+			@Override
+			public void run () {
+				while (!Thread.currentThread().isInterrupted()) {
+					try {
+						updateStatusList(statuses.take());
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+			}
+		});
+		statusListUpdater.start();
 	}
 	
 };

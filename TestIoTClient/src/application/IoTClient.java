@@ -11,10 +11,7 @@ import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MqttDefaultFilePersistence;
 import org.json.JSONObject;
 
-import javafx.application.Platform;
-
 import shared.MessageStructure;
-import shared.UIReporter;
 
 public class IoTClient implements MqttCallbackExtended {
 	
@@ -22,14 +19,16 @@ public class IoTClient implements MqttCallbackExtended {
 	private String testSubscribeTopic = "iot/test";
 	private String clientId;
 	private MqttClient client;
+	private IoTClientListener listener;
 	
-	private UIReporter reporter;
-	
-	public IoTClient(String clientId, UIReporter reporter) throws Exception {
-		this.reporter = reporter;
-		
+	public IoTClient(String clientId, IoTClientListener listener) throws Exception {
 		this.clientId = clientId;
+		this.listener = listener;
 		setupConn();
+	}
+	
+	public IoTClient(String clientId) throws Exception {
+		this(clientId, null);
 	}
 	
 	public void close() {
@@ -38,6 +37,7 @@ public class IoTClient implements MqttCallbackExtended {
 			//iotClient.disconnect();  //crashes message broker web socket server internally *only* when lwt is set
 			client.disconnectForcibly(30000, 10000, false); //so we call disconnectForcibly with default timeout values and sendDisconnectPacket set to *false*
 			client.close();
+			if (listener != null) listener.connectionClosed(clientId);
 		} catch (MqttException e) {
 			e.printStackTrace();
 		} 
@@ -45,7 +45,9 @@ public class IoTClient implements MqttCallbackExtended {
 	
 	public void publish(MessageStructure message) {
 		try {
-    		client.publish(signatureToTopic(message.getSignature()), message.getPayload(), 0, false);
+			String topic = signatureToTopic(message.getSignature());
+    		client.publish(topic, message.getPayload(), 0, false);
+    		if (listener != null) listener.messagePublished(clientId, topic, message);
     	} catch (Exception e) {
 			e.printStackTrace();
 		}
@@ -53,20 +55,17 @@ public class IoTClient implements MqttCallbackExtended {
 	
 	@Override
 	public void connectionLost(Throwable cause) {
-		Platform.runLater(new Runnable() {
-			@Override
-			public void run() {
-				String msg = clientId + ": Connection is lost. Reconnecting...";
-				reporter.reportConnectionStatus(msg);
-				reporter.addOutput(msg);
-			}
-		});
+		if (listener != null) listener.connectionLost(clientId);
 	}
 
 	@Override
-	public void messageArrived(String topic, MqttMessage message) throws Exception {
-		String msg = new String(message.getPayload(), "UTF-8");
-		reporter.addOutput(clientId + ": IoT message arrived with topic " + topic + ": " + msg);
+	public void messageArrived(String topic, MqttMessage message) {
+		try {
+			MessageStructure msg = new MessageStructure(message.getPayload());
+			if (listener != null) listener.messageReceived(clientId, topic, msg);
+		} catch(Exception e) {
+			e.printStackTrace();
+		}
 	}
 
 	@Override
@@ -76,8 +75,6 @@ public class IoTClient implements MqttCallbackExtended {
 
 	@Override
 	public void connectComplete(boolean reconnect, String serverURI) {
-		reporter.setDefaultStageTitle();
-		if (!reconnect) reporter.addOutput(clientId + ": waiting for messages.");
 		try {
 			new Thread(new Runnable () {
 				@Override
@@ -90,6 +87,11 @@ public class IoTClient implements MqttCallbackExtended {
 				}
 			}).start();
 			client.subscribe(testSubscribeTopic, 0);
+			if (listener == null) return;
+			if (reconnect) 
+				listener.connectionReestablished(clientId);
+			else
+				listener.connectionFirstEstablished(clientId);
 		} catch (Exception e) {
 			e.printStackTrace();
 		}

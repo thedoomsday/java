@@ -23,13 +23,16 @@ public class MessageSubscriber {
 	private String queueName;
 	private List<String> topicPatterns;
 	private String subscriberId;
+	private MessagingListener listener;
 	
-	public MessageSubscriber(Connection conn, String exchangeName, String queueName, List<String> topicPatterns, String subscriberId) throws IOException {
+	public MessageSubscriber(Connection conn, String exchangeName, String queueName, 
+			List<String> topicPatterns, String subscriberId, MessagingListener listener) throws IOException {
 		this.channel = conn.createChannel();
 		this.exchangeName = exchangeName;
 		this.queueName = queueName;
 		this.topicPatterns = topicPatterns;
 		this.subscriberId = subscriberId;
+		this.listener = listener;
 		startListening();
 	}
 	
@@ -50,7 +53,8 @@ public class MessageSubscriber {
 			channel.basicCancel(subscriberId);
 			channel.close();
 			isTerminated.set(true);
-			System.out.println(subscriberId  + " in Thread ID " + String.valueOf(Thread.currentThread().getId()) + " terminated.");
+			if (listener != null) listener.statusMessageNotification(subscriberId  + " in Thread ID " + 
+					String.valueOf(Thread.currentThread().getId()) + " terminated.");
 		}
 		catch (Exception e) {
 			e.printStackTrace();
@@ -63,7 +67,8 @@ public class MessageSubscriber {
 		topicPatterns.forEach(this::bindPattern);
 		channel.basicQos(1);
         channel.basicConsume(queueName, false, subscriberId, getConsumer());
-        System.out.println(subscriberId + " in Thread ID " + String.valueOf(Thread.currentThread().getId()) + " (main thread): waiting for messages.");
+        if (listener != null) listener.statusMessageNotification(subscriberId + " in Thread ID " + 
+        		String.valueOf(Thread.currentThread().getId()) + " (main thread): waiting for messages.");
 	}
 	
 	private DefaultConsumer getConsumer() {
@@ -77,8 +82,9 @@ public class MessageSubscriber {
 	            	}
 	            	isWorking.set(true);
 	            	MessageStructure message = new MessageStructure(body);
-	                System.out.println(consumerTag + " in ThreadID " + String.valueOf(Thread.currentThread().getId()) + 
-	                		": received " + message.getString() + " with routing key " + envelope.getRoutingKey());
+	            	if (listener != null) listener.statusMessageNotification(consumerTag + 
+	            			" in ThreadID " + String.valueOf(Thread.currentThread().getId()) + 
+	                		": received " + message.getString() + "\r\n" + "with routing key " + envelope.getRoutingKey());
                 	unpackRun(message);
                 	if (getChannel().isOpen()) getChannel().basicAck(envelope.getDeliveryTag(), false);
                 	isWorking.set(false);
@@ -100,10 +106,14 @@ public class MessageSubscriber {
 	}
 	
 	private void unpackRun(MessageStructure message) throws UnsupportedEncodingException {
-		System.out.println(subscriberId + " in ThreadID " + String.valueOf(Thread.currentThread().getId()) + 
-				": working with message content: " + message.getData().toString() + " from topic " + message.getSignature());
+		if (listener != null) listener.statusMessageNotification(subscriberId + 
+				" in ThreadID " + String.valueOf(Thread.currentThread().getId()) + 
+				": working with message content: " + message.getData().toString() + 
+				" from topic " + message.getSignature());
 		//Thread.sleep(1000); //simulating work
-        System.out.println(subscriberId + " in ThreadID " + String.valueOf(Thread.currentThread().getId()) + ": work done with " + message.getString());
+		if (listener != null) listener.statusMessageNotification(subscriberId + " in ThreadID " + 
+				String.valueOf(Thread.currentThread().getId()) + 
+				": work done with " + message.getString());
     }
 	
 }

@@ -1,17 +1,22 @@
 package application;
 
 import shared.MessageStructure;
-import shared.UIReporter;
 
 public class MessagingManager {
 	
-	private ConcurrentMessageStore publishStore = new ConcurrentMessageStore();
-	private ConcurrentMessageStore iotPublishStore = new ConcurrentMessageStore();
+	private ConcurrentMessageStore publishStore;
+	private ConcurrentMessageStore iotPublishStore;
 	private MessagingSupervisor supervisor;
 	
-	public MessagingManager(UIReporter reporter) throws Exception {
-		supervisor = new MessagingSupervisor(new MessagingSettings(), publishStore, iotPublishStore, reporter);
+	public MessagingManager(MessagingListener listener) throws Exception {
+		publishStore = new ConcurrentMessageStore(listener);
+		iotPublishStore = new ConcurrentMessageStore(listener);
+		supervisor = new MessagingSupervisor(new MessagingSettings(), publishStore, iotPublishStore, listener);
 		supervisor.start();
+	}
+	
+	public MessagingManager() throws Exception {
+		this(null);
 	}
 	
 	public void close() {

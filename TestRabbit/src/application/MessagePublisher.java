@@ -17,13 +17,15 @@ public class MessagePublisher implements Runnable {
 	private String exchangeName;
 	private BasicProperties messageType;
 	private ConcurrentMessageStore messageStore;
+	private MessagingListener listener;
 	
 	public MessagePublisher(Connection conn, String exchangeName, ConcurrentMessageStore messageStore, 
-			String publisherId, BasicProperties messageType) throws IOException {
+			String publisherId, BasicProperties messageType, MessagingListener listener) throws IOException {
 		this.exchangeName = exchangeName;
 		this.messageStore = messageStore;
 		this.publisherId = publisherId;
 		this.messageType = messageType;
+		this.listener = listener;
 		this.channel = conn.createChannel();
 		this.channel.exchangeDeclare(exchangeName, "topic", true);
 	}
@@ -35,7 +37,8 @@ public class MessagePublisher implements Runnable {
 	}
 	
 	public synchronized void interrupt() {
-		closeChannel();
+		if (listener != null) listener.statusMessageNotification(publisherId + ", Thread ID " + 
+				String.valueOf(Thread.currentThread().getId()) + " terminated.");
 		thread.interrupt();
 	}
 	
@@ -43,7 +46,6 @@ public class MessagePublisher implements Runnable {
 	public void run() {
 		while (!Thread.currentThread().isInterrupted()) publish();
 		closeChannel();
-		System.out.println(publisherId + ", Thread ID " + String.valueOf(Thread.currentThread().getId()) + " terminated.");
 	}
 	
 	private void closeChannel() {
@@ -62,10 +64,12 @@ public class MessagePublisher implements Runnable {
 		try {
 			if (channel.isOpen()) {
 				channel.basicPublish(exchangeName, message.getSignature(), messageType, message.getPayload());
-				System.out.println(publisherId + ", Thread ID " + String.valueOf(Thread.currentThread().getId()) + " published message.");
+				if (listener != null) listener.statusMessageNotification(publisherId + ", Thread ID " + 
+						String.valueOf(Thread.currentThread().getId()) + " published message.");
 			}
 			else {
-				System.out.println(publisherId + ", Thread ID " + String.valueOf(Thread.currentThread().getId()) + " requeueing message because connection is lost.");
+				if (listener != null) listener.statusMessageNotification(publisherId + ", Thread ID " + 
+						String.valueOf(Thread.currentThread().getId()) + " requeueing message because connection is lost.");
 				reQueueMessage(message);
 				Thread.sleep(500); //wait for connection to recover
 			}
@@ -82,7 +86,8 @@ public class MessagePublisher implements Runnable {
 		try {
 			message = messageStore.pop();
 		} catch (InterruptedException e) {
-			System.out.println(publisherId + ", Thread ID " + String.valueOf(Thread.currentThread().getId()) + " was interrupted.");
+			if (listener != null) listener.statusMessageNotification(publisherId + ", Thread ID " + 
+					String.valueOf(Thread.currentThread().getId()) + " was interrupted.");
 			Thread.currentThread().interrupt();
 		}
 		return message;
